@@ -17,20 +17,20 @@ unset nproc
 
 
 # 安装配置（nginx、openssl、PHP、cloudreve、xray的安装版本、位置等信息）
-nginx_version="nginx-1.25.1"
-openssl_version="openssl-openssl-3.1.1"
+nginx_version="nginx-1.25.2"
+openssl_version="openssl-openssl-3.1.2"
 nginx_prefix="/usr/local/nginx"
 nginx_config="${nginx_prefix}/conf.d/xray.conf"
 nginx_service="/etc/systemd/system/nginx.service"
 
-php_version="php-8.2.8"
+php_version="php-8.2.10"
 # 此处(php_prefix)请使用绝对路径(安装imagick时有影响)
 php_prefix="/usr/local/php"
 php_service="/etc/systemd/system/php-fpm.service"
 
-cloudreve_version="3.8.0"
+cloudreve_version="3.8.2"
 
-nextcloud_url="https://download.nextcloud.com/server/releases/nextcloud-27.0.0.tar.bz2"
+nextcloud_url="https://download.nextcloud.com/server/releases/nextcloud-27.1.0.tar.bz2"
 
 xray_config="/usr/local/etc/xray/config.json"
 
@@ -136,14 +136,16 @@ english_run()
     fi
     return $?
 }
-#版本比较函数
-version_ge()
+ask_if()
 {
-    if [[ "$1" =~ $'\n' ]] || [[ "$2" =~ $'\n' ]]; then
-        red "版本比较输入包含换行符！"
-        report_bug_exit
-    fi
-    test "$(sort -rV <<< "$1"$'\n'"$2" | head -n 1)" == "$1"
+    local choice=""
+    while [ "$choice" != "y" ] && [ "$choice" != "n" ]
+    do
+        tyblue "$1"
+        read -r choice
+    done
+    [ "$choice" == y ] && return 0
+    return 1
 }
 report_bug()
 {
@@ -155,6 +157,15 @@ report_bug_exit()
 {
     green  "欢迎进行Bug report(https://github.com/kirin10000/Xray-script/issues)，感谢您的支持"
     exit 1
+}
+#版本比较函数
+version_ge()
+{
+    if [[ "$1" =~ $'\n' ]] || [[ "$2" =~ $'\n' ]]; then
+        red "版本比较输入包含换行符！"
+        report_bug_exit
+    fi
+    test "$(sort -rV <<< "$1"$'\n'"$2" | head -n 1)" == "$1"
 }
 #进入工作目录
 enter_temp_dir()
@@ -178,17 +189,196 @@ check_temp_dir()
         report_bug_exit
     fi
 }
-ask_if()
+#安装依赖
+try_install_dependencies()
 {
-    local choice=""
-    while [ "$choice" != "y" ] && [ "$choice" != "n" ]
-    do
-        tyblue "$1"
-        read -r choice
-    done
-    [ "$choice" == y ] && return 0
+    if [ "$#" -le 0 ] || { [ "$#" -eq 1 ] && [ -z "$1" ]; }; then
+        red "没有输入要安装的软件包！"
+        report_bug_exit
+    fi
+    if [ "$distro_like" == "debian" ]; then
+        if apt -y --no-install-recommends -o Dpkg::Options::="--force-confnew" install "$@"; then
+            return 0
+        fi
+        apt update
+        if apt -y --no-install-recommends -o Dpkg::Options::="--force-confnew" install "$@"; then
+            return 0
+        fi
+        apt update
+        apt -y -f --no-install-recommends -o Dpkg::Options::="--force-confnew" install
+        if apt -y --no-install-recommends -o Dpkg::Options::="--force-confnew" install "$@"; then
+            return 0
+        fi
+    else
+        # yum 安装多个软件包时，若其中某些软件包不存在，不会报错
+        if [ "$pkg" == "yum" ] && [ "$#" -gt 1 ]; then
+            red "异常行为：yum install 多个包"
+            report_bug_exit
+        fi
+        gen_enablerepo_str()
+        {
+            if "$pkg" --help | grep -q "\\--enablerepo="; then
+                enablerepo_str=("--enablerepo=$1")
+            else
+                enablerepo_str=("--enablerepo" "$1")
+            fi
+        }
+        gen_disablerepo_str()
+        {
+            if "$pkg" --help | grep -q "\\--disablerepo="; then
+                disablerepo_str=("--disablerepo=$1")
+            else
+                disablerepo_str=("--disablerepo" "$1")
+            fi
+        }
+        local no_install_recommends
+        local enablerepo_str
+        local disablerepo_str
+        if "$pkg" --help | grep -q "\\--setopt="; then
+            no_install_recommends=("--setopt=install_weak_deps=0")
+        else
+            no_install_recommends=("--setopt" "install_weak_deps=0")
+        fi
+        if "$pkg" -y "${no_install_recommends[@]}" install "$@"; then
+            return 0
+        fi
+        local epel_repo
+        if [ "$distro" == centos-stream ]; then
+            epel_repo="epel,epel-next"
+        elif [ "$distro" == oracle ]; then
+            if version_ge "$system_version" 9; then
+                epel_repo="ol9_developer_EPEL"
+            elif version_ge "$system_version" 8; then
+                epel_repo="ol8_developer_EPEL"
+            elif version_ge "$system_version" 7; then
+                epel_repo="ol7_developer_EPEL"
+            fi
+        else
+            epel_repo="epel"
+        fi
+        gen_enablerepo_str "$epel_repo"
+        if "$pkg" -y "${no_install_recommends[@]}" "${enablerepo_str[@]}" install "$@"; then
+            return 0
+        fi
+        gen_enablerepo_str "$epel_repo,remi*"
+        if "$pkg" -y "${no_install_recommends[@]}" "${enablerepo_str[@]}" install "$@"; then
+            return 0
+        fi
+        gen_enablerepo_str "$epel_repo,powertools"
+        if "$pkg" -y "${no_install_recommends[@]}" "${enablerepo_str[@]}" install "$@"; then
+            return 0
+        fi
+        gen_enablerepo_str "$epel_repo,PowerTools"
+        if "$pkg" -y "${no_install_recommends[@]}" "${enablerepo_str[@]}" install "$@"; then
+            return 0
+        fi
+        gen_enablerepo_str "*"
+        gen_disablerepo_str "*-debug,*-debuginfo,*-source"
+        if "$pkg" -y "${no_install_recommends[@]}" "${enablerepo_str[@]}" "${disablerepo_str[@]}" install "$@"; then
+            return 0
+        fi
+        if "$pkg" -y "${no_install_recommends[@]}" "${enablerepo_str[@]}" install "$@"; then
+            return 0
+        fi
+    fi
     return 1
 }
+install_dependencies()
+{
+    if try_install_dependencies "$@"; then
+        return 0
+    fi
+    yellow "依赖安装失败！！"
+    report_bug
+    return 1
+}
+
+# 检查并安装单个依赖：首先检查该依赖是否已经安装(dpkg/rpm)，如果该依赖已经安装，则不再安装(apt/dnf install)
+# $1 : debian基系统
+# $2 : redhat基系统
+check_install_dependency()
+{
+    local output
+    local package_name
+    local ret=0
+    if [ "$distro_like" == "debian" ]; then
+        if english_run dpkg -s "$1" 2>/dev/null | grep -qi 'status[ '$'\t]*:[ '$'\t]*install[ '$'\t]*ok[ '$'\t]*installed[ '$'\t]*$'; then
+            if ! output="$(english_run apt-mark manual "$1")"; then
+                ret=1
+            elif ! grep -qi 'set[ '$'\t]*to[ '$'\t]*manually[ '$'\t]*installed' <<< "$output"; then
+                ret=1
+            fi
+            package_name="$1"
+        else
+            install_dependencies "$1"
+        fi
+    else
+        if rpm -q "$2" > /dev/null 2>&1; then
+            if [ "$pkg" != "dnf" ]; then
+                red "异常行为：调用check_install_dependency包管理器不是dnf！"
+                report_bug_exit
+            fi
+            dnf mark install "$2"
+            ret=$?
+            package_name="$2"
+        else
+            install_dependencies "$2"
+        fi
+    fi
+    if [ $ret -ne 0 ]; then
+        red "标记依赖 $package_name 手动安装失败！"
+        report_bug
+    fi
+}
+# 卸载软件包，对于debian基系统（使用apt），将会先检测软件包是否存在，请传入软件包使用正则表达式
+remove_dependencies()
+{
+    pkg_exist()
+    {
+        local package
+        local installed_packages
+        installed_packages="$(english_run dpkg -l | grep '^[ '$'\t]*ii[ '$'\t]' | awk '{print $2}' | cut -d : -f 1)"
+        for package in "$@"
+        do
+            if grep -q "$package" <<< "$installed_packages"; then
+                exist_pkgs+=("$package")
+            fi
+        done
+    }
+    local ret
+    if [ "$distro_like" == debian ]; then
+        # 防止apt在卸载时自动下载替代软件包
+        local exist_pkgs=()
+        pkg_exist "$@"
+        mv /etc/apt/sources.list /etc/apt/sources.list.bak
+        mv /etc/apt/sources.list.d /etc/apt/sources.list.d.bak
+        apt -y --allow-change-held-packages purge "${exist_pkgs[@]}"
+        ret=$?
+        mv /etc/apt/sources.list.bak /etc/apt/sources.list
+        mv /etc/apt/sources.list.d.bak /etc/apt/sources.list.d
+        if [ $ret -ne 0 ]; then
+            if ! apt -y -f --no-install-recommends -o Dpkg::Options::="--force-confnew" install; then
+                apt update
+                apt -y -f --no-install-recommends -o Dpkg::Options::="--force-confnew" install
+            fi
+        fi
+    else
+        # dnf卸载不存在的包时一般返回0
+        if [ "$pkg" != "dnf" ]; then
+            red "异常行为：调用remove_dependencies包管理器不是dnf！"
+            report_bug_exit
+        fi
+        dnf -y remove "$@"
+        ret=$?
+    fi
+    if [ $ret -ne 0 ]; then
+        red "卸载软件包 $* 失败！"
+        report_bug
+    fi
+}
+
+
+
 
 
 check_base_command()
@@ -233,6 +423,24 @@ check_sudo()
 }
 check_and_get_system_info()
 {
+    check_redhat_pkg_option()
+    {
+        if ! "$pkg" --help | grep -q "\\--setopt"; then
+            red "$pkg 命令不支持 \\-\\-setopt 选项"
+            red "不支持的系统！"
+            exit 1
+        fi
+        if ! "$pkg" --help | grep -q "\\--disablerepo"; then
+            red "$pkg 命令不支持 \\--disablerepo 选项"
+            red "不支持的系统！"
+            exit 1
+        fi
+        if ! "$pkg" --help | grep -q "\\--enablerepo"; then
+            red "$pkg 命令不支持 \\--enablerepo 选项"
+            red "不支持的系统！"
+            exit 1
+        fi
+    }
     check_base_command
     if [ "$EUID" != "0" ]; then
         red "请用root用户运行此脚本！！"
@@ -300,21 +508,7 @@ check_and_get_system_info()
             red "不支持的系统！"
             exit 1
         fi
-        if ! "$pkg" --help | grep -q "\\-\\-setopt"; then
-            red "$pkg 命令不支持 \\-\\-setopt 选项"
-            red "不支持的系统！"
-            exit 1
-        fi
-        if ! "$pkg" --help | grep -q "\\-\\-disablerepo"; then
-            red "$pkg 命令不支持 \\-\\-disablerepo 选项"
-            red "不支持的系统！"
-            exit 1
-        fi
-        if ! "$pkg" --help | grep -q "\\-\\-enablerepo"; then
-            red "$pkg 命令不支持 \\-\\-enablerepo 选项"
-            red "不支持的系统！"
-            exit 1
-        fi
+        check_redhat_pkg_option
         if [ "$pkg" != "dnf" ]; then
             if rpm -q dnf > /dev/null 2>&1; then
                 red "dnf 已安装但没有可执行文件！"
@@ -322,8 +516,12 @@ check_and_get_system_info()
             fi
             tyblue "缺少包管理器dnf，尝试安装。。。"
             install_dependencies dnf
-            check_and_get_system_info
-            return
+            if [ -z "$(type -P dnf)" ]; then
+                red "dnf 安装失败！"
+                exit 1
+            fi
+            pkg="dnf"
+            check_redhat_pkg_option
         fi
     else
         red "apt/apt-get/dnf/microdnf/yum命令均不存在！"
@@ -558,199 +756,17 @@ get_install_info()
     [ $xray_is_installed -eq 1 ] && [ $nginx_is_installed -eq 1 ] && is_installed=1 || is_installed=0
     get_config_info
 }
-
-
-#安装依赖
-try_install_dependencies()
+config_check()
 {
-    if [ "$#" -le 0 ] || { [ "$#" -eq 1 ] && [ -z "$1" ]; }; then
-        red "没有输入要安装的软件包！"
-        report_bug_exit
+    if [ $is_installed -eq 0 ]; then
+        red "尚未安装Xray-REALITY+Web，请先安装"
+        exit 0
     fi
-    if [ "$distro_like" == "debian" ]; then
-        if apt -y --no-install-recommends -o Dpkg::Options::="--force-confnew" install "$@"; then
-            return 0
-        fi
-        apt update
-        if apt -y --no-install-recommends -o Dpkg::Options::="--force-confnew" install "$@"; then
-            return 0
-        fi
-        apt update
-        apt -y -f --no-install-recommends -o Dpkg::Options::="--force-confnew" install
-        if apt -y --no-install-recommends -o Dpkg::Options::="--force-confnew" install "$@"; then
-            return 0
-        fi
-    else
-        # yum 安装多个软件包时，若其中某些软件包不存在，不会报错
-        if [ "$pkg" == "yum" ] && [ "$#" -gt 1 ]; then
-            red "异常行为：yum install 多个包"
-            report_bug_exit
-        fi
-        gen_enablerepo_str()
-        {
-            if "$pkg" --help | grep -q "\\-\\-enablerepo="; then
-                enablerepo_str=("--enablerepo=$1")
-            else
-                enablerepo_str=("--enablerepo" "$1")
-            fi
-        }
-        gen_disablerepo_str()
-        {
-            if "$pkg" --help | grep -q "\\-\\-disablerepo="; then
-                disablerepo_str=("--disablerepo=$1")
-            else
-                disablerepo_str=("--disablerepo" "$1")
-            fi
-        }
-        local no_install_recommends
-        local enablerepo_str
-        local disablerepo_str
-        if "$pkg" --help | grep -q "\\-\\-setopt="; then
-            no_install_recommends=("--setopt=install_weak_deps=0")
-        else
-            no_install_recommends=("--setopt" "install_weak_deps=0")
-        fi
-        if "$pkg" -y "${no_install_recommends[@]}" install "$@"; then
-            return 0
-        fi
-        local epel_repo
-        if [ "$distro" == centos-stream ]; then
-            epel_repo="epel,epel-next"
-        elif [ "$distro" == oracle ]; then
-            if version_ge "$system_version" 9; then
-                epel_repo="ol9_developer_EPEL"
-            elif version_ge "$system_version" 8; then
-                epel_repo="ol8_developer_EPEL"
-            elif version_ge "$system_version" 7; then
-                epel_repo="ol7_developer_EPEL"
-            fi
-        else
-            epel_repo="epel"
-        fi
-        gen_enablerepo_str "$epel_repo"
-        if "$pkg" -y "${no_install_recommends[@]}" "${enablerepo_str[@]}" install "$@"; then
-            return 0
-        fi
-        gen_enablerepo_str "$epel_repo,remi*"
-        if "$pkg" -y "${no_install_recommends[@]}" "${enablerepo_str[@]}" install "$@"; then
-            return 0
-        fi
-        gen_enablerepo_str "$epel_repo,powertools"
-        if "$pkg" -y "${no_install_recommends[@]}" "${enablerepo_str[@]}" install "$@"; then
-            return 0
-        fi
-        gen_enablerepo_str "$epel_repo,PowerTools"
-        if "$pkg" -y "${no_install_recommends[@]}" "${enablerepo_str[@]}" install "$@"; then
-            return 0
-        fi
-        gen_enablerepo_str "*"
-        gen_disablerepo_str "*-debug,*-debuginfo,*-source"
-        if "$pkg" -y "${no_install_recommends[@]}" "${enablerepo_str[@]}" "${disablerepo_str[@]}" install "$@"; then
-            return 0
-        fi
-        if "$pkg" -y "${no_install_recommends[@]}" "${enablerepo_str[@]}" install "$@"; then
-            return 0
-        fi
-    fi
-    return 1
-}
-install_dependencies()
-{
-    if try_install_dependencies "$@"; then
-        return 0
-    fi
-    yellow "依赖安装失败！！"
-    report_bug
-    return 1
-}
-
-# 检查并安装单个依赖：首先检查该依赖是否已经安装(dpkg/rpm)，如果该依赖已经安装，则不再安装(apt/dnf install)
-# $1 : debian基系统
-# $2 : redhat基系统
-check_install_dependency()
-{
-    local output
-    local package_name
-    local ret=0
-    if [ "$distro_like" == "debian" ]; then
-        if english_run dpkg -s "$1" 2>/dev/null | grep -qi 'status[ '$'\t]*:[ '$'\t]*install[ '$'\t]*ok[ '$'\t]*installed[ '$'\t]*$'; then
-            if ! output="$(english_run apt-mark manual "$1")"; then
-                ret=1
-            elif ! grep -qi 'set[ '$'\t]*to[ '$'\t]*manually[ '$'\t]*installed' <<< "$output"; then
-                ret=1
-            fi
-            package_name="$1"
-        else
-            install_dependencies "$1"
-        fi
-    else
-        if rpm -q "$2" > /dev/null 2>&1; then
-            if [ "$pkg" != "dnf" ]; then
-                red "异常行为：调用check_install_dependency包管理器不是dnf！"
-                report_bug_exit
-            fi
-            dnf mark install "$2"
-            ret=$?
-            package_name="$2"
-        else
-            install_dependencies "$2"
-        fi
-    fi
-    if [ $ret -ne 0 ]; then
-        red "标记依赖 $package_name 手动安装失败！"
-        report_bug
+    if [ -z "$reality_private_key" ]; then
+        yellow "当前配置不自洽，请重新安装"
+        exit 0
     fi
 }
-# 卸载软件包，对于debian基系统（使用apt），将会先检测软件包是否存在，请传入软件包使用正则表达式
-remove_dependencies()
-{
-    pkg_exist()
-    {
-        local package
-        local installed_packages
-        installed_packages="$(english_run dpkg -l | grep '^[ '$'\t]*ii[ '$'\t]' | awk '{print $2}' | cut -d : -f 1)"
-        for package in "$@"
-        do
-            if grep -q "$package" <<< "$installed_packages"; then
-                exist_pkgs+=("$package")
-            fi
-        done
-    }
-    local ret
-    if [ "$distro_like" == debian ]; then
-        # 防止apt在卸载时自动下载替代软件包
-        local exist_pkgs=()
-        pkg_exist "$@"
-        mv /etc/apt/sources.list /etc/apt/sources.list.bak
-        mv /etc/apt/sources.list.d /etc/apt/sources.list.d.bak
-        apt -y --allow-change-held-packages purge "${exist_pkgs[@]}"
-        ret=$?
-        mv /etc/apt/sources.list.bak /etc/apt/sources.list
-        mv /etc/apt/sources.list.d.bak /etc/apt/sources.list.d
-        if [ $ret -ne 0 ]; then
-            if ! apt -y -f --no-install-recommends -o Dpkg::Options::="--force-confnew" install; then
-                apt update
-                apt -y -f --no-install-recommends -o Dpkg::Options::="--force-confnew" install
-            fi
-        fi
-    else
-        # dnf卸载不存在的包时一般返回0
-        if [ "$pkg" != "dnf" ]; then
-            red "异常行为：调用remove_dependencies包管理器不是dnf！"
-            report_bug_exit
-        fi
-        dnf -y remove "$@"
-        ret=$?
-    fi
-    if [ $ret -ne 0 ]; then
-        red "卸载软件包 $* 失败！"
-        report_bug
-    fi
-}
-
-
-
-
 
 
 
@@ -880,7 +896,7 @@ doupdate()
         else
             dnf -y autoremove
             local no_install_recommends
-            if dnf --help | grep -q "\\-\\-setopt="; then
+            if dnf --help | grep -q "\\--setopt="; then
                 no_install_recommends=("--setopt=install_weak_deps=0")
             else
                 no_install_recommends=("--setopt" "install_weak_deps=0")
@@ -1687,9 +1703,15 @@ EOF
     exit 0
 }
 
-#删除防火墙和阿里云盾
+# 删除防火墙和阿里云盾
 uninstall_firewall()
 {
+    tyblue "========== 卸载云盾和防火墙 ========="
+    tyblue " 此功能将删除系统防火墙及部分服务器提供商的监控软件(如阿里云盾、腾讯云盾、华为云盾等)"
+    yellow " 注意：此功能可能删除自定义iptables规则"
+    tyblue " 若无特殊需求，请选择卸载(输入y，然后按回车)"
+    echo
+    ! ask_if "是否卸载云盾和防火墙？(y/n)" && return
     green "正在删除防火墙。。。"
     ufw disable
     if [ "$distro_like" == debian ]; then
@@ -2193,33 +2215,33 @@ install_web_dependencies()
 gen_cflags()
 {
     cflags=('-g0' '-Ofast' -march=native -mtune=native)
-    if gcc -v --help 2>&1 | grep -qw "\\-fstack\\-reuse"; then
+    if gcc -v --help 2>&1 | grep -qw "\\-fstack-reuse"; then
         cflags+=('-fstack-reuse=all')
     fi
     if gcc -v --help 2>&1 | grep -qw "\\-fexceptions"; then
         cflags+=('-fno-exceptions')
-    elif gcc -v --help 2>&1 | grep -qw "\\-fhandle\\-exceptions"; then
+    elif gcc -v --help 2>&1 | grep -qw "\\-fhandle-exceptions"; then
         cflags+=('-fno-handle-exceptions')
     fi
-    if gcc -v --help 2>&1 | grep -qw "\\-funwind\\-tables"; then
+    if gcc -v --help 2>&1 | grep -qw "\\-funwind-tables"; then
         cflags+=('-fno-unwind-tables')
     fi
-    if gcc -v --help 2>&1 | grep -qw "\\-fasynchronous\\-unwind\\-tables"; then
+    if gcc -v --help 2>&1 | grep -qw "\\-fasynchronous-unwind-tables"; then
         cflags+=('-fno-asynchronous-unwind-tables')
     fi
-    if gcc -v --help 2>&1 | grep -qw "\\-fstack\\-check"; then
+    if gcc -v --help 2>&1 | grep -qw "\\-fstack-check"; then
         cflags+=('-fno-stack-check')
     fi
-    if gcc -v --help 2>&1 | grep -qw "\\-fstack\\-clash\\-protection"; then
+    if gcc -v --help 2>&1 | grep -qw "\\-fstack-clash-protection"; then
         cflags+=('-fno-stack-clash-protection')
     fi
-    if gcc -v --help 2>&1 | grep -qw "\\-fstack\\-protector"; then
+    if gcc -v --help 2>&1 | grep -qw "\\-fstack-protector"; then
         cflags+=('-fno-stack-protector')
     fi
-    if gcc -v --help 2>&1 | grep -qw "\\-fcf\\-protection="; then
+    if gcc -v --help 2>&1 | grep -qw "\\-fcf-protection="; then
         cflags+=('-fcf-protection=none')
     fi
-    if gcc -v --help 2>&1 | grep -qw "\\-fsplit\\-stack"; then
+    if gcc -v --help 2>&1 | grep -qw "\\-fsplit-stack"; then
         cflags+=('-fno-split-stack')
     fi
     if gcc -v --help 2>&1 | grep -qw "\\-fsanitize"; then
@@ -2229,29 +2251,29 @@ gen_cflags()
         fi
         rm temp.c
     fi
-    if gcc -v --help 2>&1 | grep -qw "\\-finstrument\\-functions"; then
+    if gcc -v --help 2>&1 | grep -qw "\\-finstrument-functions"; then
         cflags+=('-fno-instrument-functions')
     fi
 }
 gen_cxxflags()
 {
     cxxflags=('-g0' '-Ofast' -march=native -mtune=native)
-    if g++ -v --help 2>&1 | grep -qw "\\-fstack\\-reuse"; then
+    if g++ -v --help 2>&1 | grep -qw "\\-fstack-reuse"; then
         cxxflags+=('-fstack-reuse=all')
     fi
-    if g++ -v --help 2>&1 | grep -qw "\\-fstack\\-check"; then
+    if g++ -v --help 2>&1 | grep -qw "\\-fstack-check"; then
         cxxflags+=('-fno-stack-check')
     fi
-    if g++ -v --help 2>&1 | grep -qw "\\-fstack\\-clash\\-protection"; then
+    if g++ -v --help 2>&1 | grep -qw "\\-fstack-clash-protection"; then
         cxxflags+=('-fno-stack-clash-protection')
     fi
-    if g++ -v --help 2>&1 | grep -qw "\\-fstack\\-protector"; then
+    if g++ -v --help 2>&1 | grep -qw "\\-fstack-protector"; then
         cxxflags+=('-fno-stack-protector')
     fi
-    if g++ -v --help 2>&1 | grep -qw "\\-fcf\\-protection="; then
+    if g++ -v --help 2>&1 | grep -qw "\\-fcf-protection="; then
         cxxflags+=('-fcf-protection=none')
     fi
-    if g++ -v --help 2>&1 | grep -qw "\\-fsplit\\-stack"; then
+    if g++ -v --help 2>&1 | grep -qw "\\-fsplit-stack"; then
         cxxflags+=('-fno-split-stack')
     fi
     if g++ -v --help 2>&1 | grep -qw "\\-fsanitize"; then
@@ -2261,10 +2283,10 @@ gen_cxxflags()
         fi
         rm temp.cpp
     fi
-    if g++ -v --help 2>&1 | grep -qw "\\-finstrument\\-functions"; then
+    if g++ -v --help 2>&1 | grep -qw "\\-finstrument-functions"; then
         cxxflags+=('-fno-instrument-functions')
     fi
-    if g++ -v --help 2>&1 | grep -qw "\\-fvtable\\-verify"; then
+    if g++ -v --help 2>&1 | grep -qw "\\-fvtable-verify"; then
         cxxflags+=('-fvtable-verify=none')
     fi
 }
@@ -3801,19 +3823,6 @@ disable_xray_reality_web()
     disable_all_cloudreves
     tyblue "Xray-REALITY+Web 已停止并禁用"
 }
-
-config_check()
-{
-    if [ $is_installed -eq 0 ]; then
-        red "尚未安装Xray-REALITY+Web，请先安装"
-        exit 0
-    fi
-    if [ -z "$reality_private_key" ]; then
-        yellow "当前配置不自洽，请重新安装"
-        exit 0
-    fi
-}
-
 full_install_php()
 {
     check_temp_dir
@@ -4611,13 +4620,13 @@ start_menu()
             change_uid
             ;;
         22)
-            change_grpc_serviceName
+            reset_reality_key
             ;;
         23)
-            change_ws_path
+            change_grpc_serviceName
             ;;
         24)
-            reset_reality_key
+            change_ws_path
             ;;
         25)
             simplify_system
@@ -4630,16 +4639,48 @@ start_menu()
 # 获取系统信息（系统类型、版本、包管理器、处理器指令集、处理器数量）
 # 检查系统是否支持安装
 check_and_get_system_info
+if [ "$distro" == oracle ] && version_ge "$system_version" 7 && ! version_ge "$system_version" 8; then
+    # 对于oracle7，修复dnf源不可用的bug
+    sed -i 's#yum$ociregion.$ocidomain#yum.oracle.com#g' /etc/yum.repos.d/*.repo
+fi
 # 防止包管理器在安装过程中被意外卸载
 if [ "$pkg" == apt ]; then
     if ! output="$(english_run apt-mark manual apt)" || ! grep -qi 'set[ '$'\t]*to[ '$'\t]*manually[ '$'\t]*installed' <<< "$output"; then
         red "标记 apt 手动安装失败！"
         report_bug
     fi
+    if ! output="$(english_run apt-mark manual dpkg)" || ! grep -qi 'set[ '$'\t]*to[ '$'\t]*manually[ '$'\t]*installed' <<< "$output"; then
+        red "标记 dpkg 手动安装失败！"
+        report_bug
+    fi
     unset output
 else
     if ! dnf mark install dnf >/dev/null; then
-        red "标记 dnf 手动安装失败！"
+        # 一些老系统如centos7、ol7，需要进行一次dnf install/remove操作才能正常使用dnf mark操作
+        # 这里对wget软件包进行卸载/安装
+        if dnf --help | grep -q "\\--setopt="; then
+            no_install_recommends=("--setopt=install_weak_deps=0")
+        else
+            no_install_recommends=("--setopt" "install_weak_deps=0")
+        fi
+        if rpm -q wget > /dev/null 2>&1; then
+            dnf -y remove wget
+            if ! dnf -y "${no_install_recommends[@]}" install wget; then
+                yellow "dnf安装wget失败！"
+                report_bug
+            fi
+        else
+            dnf -y "${no_install_recommends[@]}" install wget
+            dnf -y remove wget
+        fi
+        if ! dnf mark install dnf; then
+            red "标记 dnf 手动安装失败！"
+            report_bug
+        fi
+        unset no_install_recommends
+    fi
+    if ! dnf mark install rpm >/dev/null; then
+        red "标记 rpm 手动安装失败！"
         report_bug
     fi
 fi
